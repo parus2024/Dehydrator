@@ -1,0 +1,273 @@
+substitutions:
+  name: dehydrator
+  friendly_name: Dehydrator
+  friendly_name_short: dehydrator
+  version: '29.09.2025'
+  device_ip: 192.168.0.250
+  reboot_timeout: 0s
+
+<<: !include attach/common/esphome.yaml 
+<<: !include attach/common/esp/esp01_1m_restore.yaml
+<<: !include attach/common/logger/debug.yaml
+<<: !include attach/common/api.yaml
+<<: !include attach/common/ota.yaml
+<<: !include attach/common/wifi.yaml
+<<: !include attach/common/web/web_server3.yaml
+
+packages:
+  common: !include attach/packages/standart.yaml
+  time_sun: !include attach/packages/time_sun.yaml
+
+one_wire:
+  - platform: gpio
+    pin: GPIO1
+
+sensor:
+  - platform: dallas_temp
+    address: 0x82e17cbc0164ff28
+    name: Temperature
+    id: temp
+    update_interval: 5s
+    filters:
+      - round: 1
+    on_value:
+      then:
+        - if: # Проверка аварийной температуры
+            condition:
+              and:
+                - lambda: 'return (id(temp).state > id(emergency_temp).state);'
+            then:
+              - light.turn_off: heater
+        - if: # Если heater ON, но fan OFF — выключить heater (каждые 5 сек)
+            condition:
+              and:
+                - light.is_on: heater
+                - fan.is_off: my_fan
+            then:
+              - light.turn_off: heater
+
+light:
+  - platform: monochromatic
+    output: pwm_output
+    name: "Heater"
+    id: heater
+    gamma_correct: 1.5
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:  # Когда heater пытаются включить...
+      then:
+        - logger.log: "Heater ON attempt: Checking fan..."
+        - if:  # Если вентилятор выключен — НЕ включаем heater, выключаем его сразу
+            condition:
+              not:
+                - fan.is_on: my_fan
+            then:
+              - light.turn_off: heater
+            else:  # Если вентилятор включён — включаем heater и убеждаемся, что фан на максимуме
+              - lambda: |-
+                  // Включаем фан на максимум (если он уже не включён)
+                  if (!id(my_fan).state) {
+                    auto call = id(my_fan).turn_on();
+                    call.set_speed(3);  // Максимум
+                    call.perform();
+                  }
+
+number:
+  - platform: template
+    name: "Heater Level"
+    id: heater_level
+    min_value: 0
+    max_value: 100
+    step: 1
+    optimistic: true
+    initial_value: 75  # По умолчанию 75%
+    unit_of_measurement: "%"
+    restore_value: true
+    on_value:
+      then:
+        - light.turn_on:
+            id: heater
+            brightness: !lambda 'return id(heater_level).state / 100.0;'  # Преобразует % в 0.0-1.0
+
+  - platform: template  # Аварийная температура (при превышении — heater OFF)
+    name: "Alarm Temperature"
+    id: emergency_temp
+    min_value: 50
+    max_value: 120
+    step: 1
+    unit_of_measurement: "°C"
+    optimistic: true
+    initial_value: 70  # По умолчанию 70°C
+    restore_value: true
+
+  - platform: template
+    name: "PWM Frequency"
+    id: pwm_freq
+    min_value: 1
+    max_value: 100
+    step: 0.1
+    mode: box
+    optimistic: true
+    unit_of_measurement: "Hz"
+    initial_value: 1
+    on_value:
+      - output.esp8266_pwm.set_frequency:
+          id: pwm_output
+          frequency: !lambda return x;
+fan:
+  - platform: speed
+    output: fan_output
+    name: "Fan"
+    id: my_fan
+    speed_count: 3
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_off: # Когда вентилятор выключают — ВЫКЛЮЧАЕМ heater для безопасности!
+      then:
+        - light.turn_off: heater
+
+output:
+  - platform: esp8266_pwm
+    pin: GPIO2
+    frequency: 200 Hz
+    id: fan_output
+
+  - platform: esp8266_pwm
+    pin: GPIO12
+    id: pwm_output
+    frequency: 1 Hz  # начальная частота
+
+datetime:
+  - platform: template
+    id: heater_on
+    type: time
+    name: "ON Time"
+    icon: "mdi:clock-check-outline"
+    optimistic: true
+    initial_value: "00:01:00"
+    restore_value: true
+    on_time:
+      then:
+        - if:
+            condition:
+              and:
+                - lambda: 'return id(auto_mode).state ;'
+            then:
+              - lambda: |-
+                  // Включаем фан и устанавливаем выбранную скорость (из select)
+                  auto call = id(my_fan).turn_on();
+                  // Преобразуем строку из select в число (uint8_t)
+                  uint8_t selected_speed = atoi(id(fan_speed_level).state.c_str());
+                  call.set_speed(selected_speed);
+                  call.perform();
+              - delay: 1s
+              - light.turn_on:  # Включаем heater на желаемый уровень
+                  id: heater
+                  brightness: !lambda 'return (id(heater_level).state / 100.0);'
+  - platform: template
+    id: heater_off
+    type: time
+    name: "OFF Time"
+    icon: "mdi:clock-check-outline"
+    optimistic: true
+    initial_value: "07:00:00"
+    restore_value: true
+    on_time:
+      then:
+        - if:
+            condition:
+              and:
+                - lambda: 'return id(auto_mode).state ;'
+            then:
+              - lambda: |-
+                  auto call = id(my_fan).turn_off();
+                  call.perform();
+              - light.turn_off: heater
+
+switch:
+  - platform: template
+    name: "AutoMode"
+    id: auto_mode
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+select:
+  - platform: template
+    name: "Fan Speed Level"
+    id: fan_speed_level
+    options:
+      - "1"
+      - "2"
+      - "3"
+    optimistic: true
+    restore_value: true
+    initial_option: "2"
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: |-
+          if (!id(auto_mode).state) {
+            ESP_LOGD("dehydrator", "Auto mode off, skipping check");
+            return;
+          }
+
+          // Получаем текущее время в минутах
+          auto now = id(sntp_time).now();
+          int current_minutes = now.hour * 60 + now.minute;
+
+          // Получаем времена heater_on и heater_off в минутах
+          int on_minutes = id(heater_on).hour * 60 + id(heater_on).minute;
+          int off_minutes = id(heater_off).hour * 60 + id(heater_off).minute;
+
+          // Проверяем диапазон (учитывая переход через полночь)
+          bool in_range = false;
+          if (on_minutes < off_minutes) {
+            in_range = (current_minutes >= on_minutes && current_minutes < off_minutes);
+          } else {
+            in_range = (current_minutes >= on_minutes || current_minutes < off_minutes);
+          }
+
+          ESP_LOGD("dehydrator", "Time check: current_min=%d, on_min=%d, off_min=%d, in_range=%s",
+                   current_minutes, on_minutes, off_minutes, in_range ? "true" : "false");
+
+          if (in_range) {
+            ESP_LOGD("dehydrator", "In range — turning on fan and heater");
+            // включаем вентилятор и нагреватель
+            uint8_t selected_speed = atoi(id(fan_speed_level).state.c_str());
+            if (selected_speed < 1 || selected_speed > 3) selected_speed = 1;  // Защита от мусора
+
+            // Включаем вентилятор с выбранной скоростью
+            auto call_fan = id(my_fan).turn_on();
+            call_fan.set_speed(selected_speed);
+            call_fan.perform();
+
+            // Включаем нагреватель с уровнем из heater_level
+            if (!id(heater).current_values.is_on()) {
+              auto call_heater = id(heater).turn_on();
+              call_heater.set_brightness(id(heater_level).state / 100.0f);
+              call_heater.perform();
+            }
+          } else {
+            ESP_LOGD("dehydrator", "Out of range — forcing off fan and heater");
+            // Логи перед выключением
+            ESP_LOGD("dehydrator", "Before force off: fan state=%s, heater state=%s",
+                     id(my_fan).state ? "on" : "off", id(heater).current_values.is_on() ? "on" : "off");
+            // проверяем и выключаем, если нужно
+            ESP_LOGD("dehydrator", "Fan state before off: %s", id(my_fan).state ? "on" : "off");
+            ESP_LOGD("dehydrator", "Fan speed before off: %f", id(my_fan).speed);
+
+            if (id(my_fan).state) {  // Или if (id(my_fan).speed > 0) — выберите, что лучше отражает логику
+              auto call = id(my_fan).turn_off();
+              call.perform();
+              ESP_LOGD("dehydrator", "Fan forced off");
+            }
+            ESP_LOGD("dehydrator", "Fan state after off: %s", id(my_fan).state ? "on" : "off");
+            ESP_LOGD("dehydrator", "Fan speed after off: %f", id(my_fan).speed);
+            if (id(heater).current_values.is_on()) {
+              auto call_heater = id(heater).turn_off();
+              call_heater.perform();  // Принудительное выполнение
+              ESP_LOGD("dehydrator", "Heater forced off");
+            }
+            // Логи после выключения
+            ESP_LOGD("dehydrator", "After force off: fan state=%s, heater state=%s",
+                     id(my_fan).state ? "on" : "off", id(heater).current_values.is_on() ? "on" : "off");
+          }
