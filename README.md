@@ -73,7 +73,7 @@
 *(Добавьте сюда скриншоты дисплея, HA дашборда или видео демонстрации)*
 
 - [yaml файл прошивки](dehydrator.yaml)
-- [внешний вид](Dehydrator/dehydrator.jpg)
+- [внешний вид](Dehydrator/dehydrator.png)
 
 ---
 
