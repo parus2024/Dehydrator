@@ -75,6 +75,8 @@
 
 - [yaml файл прошивки](dehydrator.yaml)
 - [внешний вид](dehydrator.png)
+- [интерфейс](dehydrator.jpg)
+- [видео](dehydrator.mp4)
 
 ---
 
